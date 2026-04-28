@@ -30,10 +30,12 @@
 #define sleep(a) Sleep(a * 1000)
 #else
 #include <arpa/inet.h>  /// For the type in_addr_t and in_port_t
+#include <errno.h>
 #include <netdb.h>  /// For structures returned by the network database library - formatted internet addresses and port numbers
 #include <netinet/in.h>  /// For in_addr and sockaddr_in structures
 #include <sys/socket.h>  /// For macro definitions related to the creation of sockets
 #include <sys/types.h>  /// For definitions to allow for the porting of BSD programs
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 #include <stdint.h>  /// For specific bit size values of variables
@@ -125,7 +127,11 @@ int main()
      * Connects the client to the server address using the socket descriptor
      * This enables the two to communicate and exchange data
      */
-    connect(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr));
+    if (connect(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0)
+    {
+        close(sockfd);
+        error();
+    }
 
     printf("Client is connected...\n");
 
@@ -161,27 +167,49 @@ int main()
         {
             bzero(&sendbuff, sizeof(sendbuff));
             printf("\nType message here: ");
-            fgets(sendbuff, 1024, stdin);
-            send(sockfd, sendbuff, strlen(sendbuff) + 1, 0);
+            if (fgets(sendbuff, 1024, stdin) == NULL)
+            {
+                shutdown(sockfd, SHUT_WR);
+                break;
+            }
+            if (send(sockfd, sendbuff, strlen(sendbuff) + 1, 0) <= 0)
+            {
+                shutdown(sockfd, SHUT_WR);
+                break;
+            }
             printf("\nMessage sent!\n");
             sleep(5);
             // break;
         }
+        close(sockfd);
+        _exit(0);
     }
-    else  /// Parent Process
+    else if (pid > 0)  /// Parent Process
     {
         while (1)
         {
             bzero(&recvbuff, sizeof(recvbuff));
-            recv(sockfd, recvbuff, sizeof(recvbuff), 0);
+            ssize_t n = recv(sockfd, recvbuff, sizeof(recvbuff), 0);
+            if (n <= 0)
+            {
+                shutdown(sockfd, SHUT_RD);
+                break;
+            }
             printf("\nSERVER: %s\n", recvbuff);
             sleep(5);
             // break;
         }
+#ifndef _WIN32
+        waitpid(pid, NULL, 0);
+#endif
+        close(sockfd);
+        printf("Client is offline...\n");
+    }
+    else
+    {
+        close(sockfd);
+        error();
     }
 
-    /// Close Socket
-    close(sockfd);
-    printf("Client is offline...\n");
     return 0;
 }
