@@ -25,15 +25,18 @@
 #include <Ws2tcpip.h>
 #include <io.h>
 #include <windows.h>
-#include <winsock2.h> 
+#include <winsock2.h>
 #include "fork.h"
 #define sleep(a) Sleep(a * 1000)
 #else
 #include <arpa/inet.h>  /// For the type in_addr_t and in_port_t
+#include <errno.h>
 #include <netdb.h>  /// For structures returned by the network database library - formatted internet addresses and port numbers
 #include <netinet/in.h>  /// For in_addr and sockaddr_in structures
+#include <signal.h>
 #include <sys/socket.h>  /// For macro definitions related to the creation of sockets
 #include <sys/types.h>  /// For definitions to allow for the porting of BSD programs
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 #include <stdint.h>  /// For specific bit size values of variables
@@ -42,6 +45,7 @@
 #include <string.h>  /// Various functions for manipulating arrays of characters
 
 #define PORT 10000  /// Define port over which communication will take place
+#define MAX_MESSAGE_SIZE 1024
 
 /**
  * @brief Utility function used to print an error message to `stderr`.
@@ -53,6 +57,50 @@ void error()
 {
     perror("Socket Creation Failed");
     exit(EXIT_FAILURE);
+}
+
+static ssize_t recv_all(int sock, void *buf, size_t len)
+{
+    size_t total = 0;
+    char *p = (char *)buf;
+
+    while (total < len)
+    {
+        ssize_t n = recv(sock, p + total, len - total, 0);
+        if (n < 0)
+        {
+            return -1;
+        }
+        if (n == 0)
+        {
+            break;
+        }
+        total += (size_t)n;
+    }
+
+    return (ssize_t)total;
+}
+
+static ssize_t send_all(int sock, const void *buf, size_t len)
+{
+    size_t total = 0;
+    const char *p = (const char *)buf;
+
+    while (total < len)
+    {
+        ssize_t n = send(sock, p + total, len - total, 0);
+        if (n < 0)
+        {
+            return -1;
+        }
+        if (n == 0)
+        {
+            break;
+        }
+        total += (size_t)n;
+    }
+
+    return (ssize_t)total;
 }
 
 /**
@@ -95,6 +143,11 @@ int main()
         error();  ///< Error if the socket descriptor has a value lower than 0 -
                   /// socket wasnt created
     }
+
+#ifndef _WIN32
+    signal(SIGPIPE, SIG_IGN);
+    signal(SIGCHLD, SIG_IGN);
+#endif
 
     /**
      * Server Address Information
@@ -148,6 +201,10 @@ int main()
      * accepted and established through the socket descriptor
      */
     conn = accept(sockfd, (struct sockaddr *)NULL, NULL);
+    if ((int)conn < 0)
+    {
+        error();
+    }
 
     printf("Server is connected...\n");
 
@@ -188,25 +245,46 @@ int main()
     {
         while (1)
         {
+            ssize_t nread;
             bzero(&recvbuff, sizeof(recvbuff));
-            recv(conn, recvbuff, sizeof(recvbuff), 0);
+            nread = recv_all(conn, recvbuff, sizeof(recvbuff) - 1);
+            if (nread <= 0)
+            {
+                break;
+            }
+            recvbuff[nread] = '\0';
             printf("\nCLIENT : %s\n", recvbuff);
             sleep(5);
             // break;
         }
+#ifndef _WIN32
+        close(conn);
+#endif
+        return 0;
     }
-    else  /// Parent process
+    else if (pid > 0)  /// Parent process
     {
         while (1)
         {
+            ssize_t nsend;
             bzero(&sendbuff, sizeof(sendbuff));
             printf("\nType message here: ");
-            fgets(sendbuff, 1024, stdin);
-            send(conn, sendbuff, strlen(sendbuff) + 1, 0);
+            if (fgets(sendbuff, sizeof(sendbuff), stdin) == NULL)
+            {
+                break;
+            }
+            sendbuff[sizeof(sendbuff) - 1] = '\0';
+            nsend = send_all(conn, sendbuff, strnlen(sendbuff, sizeof(sendbuff)));
+            if (nsend < 0)
+            {
+                break;
+            }
             printf("\nMessage Sent!\n");
             sleep(5);
             // break;
         }
+        shutdown(conn, SHUT_RDWR);
+        close(conn);
     }
 
     /// Close socket
